@@ -1,79 +1,195 @@
+/**
+ * src/ui/quiz.js — panel de pregunta estilo pergamino.
+ *
+ * API (SPEC.md, Anexo A):
+ *   createQuiz(root, audio) -> quiz
+ *   quiz.ask(question, index, total, onAnswer)
+ *     question = { q, options[], answerIdx, explanation?, subtopic? }
+ *   onAnswer({ ok, selected, correct, timedOut })
+ *   quiz.close(); quiz.isOpen()
+ *
+ * `audio` es el objeto Sound de src/audio.js: se usan los efectos
+ * 'questionOpen', 'correct' y 'wrong' si están disponibles.
+ */
+const LETTERS = ['A', 'B', 'C', 'D'];
+const TIME_LIMIT = 40; // segundos por pregunta
+
 export function createQuiz(root, audio) {
-  let currentQuestion = null;
-  let totalQuestions = 0;
-  let onAnswer = null;
-  let questionIndex = 0;
-  let timer = null;
+  const sfx = (name) => {
+    try { if (audio && typeof audio.sfx === 'function') audio.sfx(name); } catch (e) { /* sin audio */ }
+  };
 
   const container = document.createElement('div');
-  container.style.position = 'absolute';
-  container.style.top = '0'; container.style.left = '0'; container.style.width = '100%'; container.style.height = '100%';
-  container.style.background = 'rgba(255,255,255,0.8)';
-  container.style.backdropFilter = 'blur(4px)';
-  container.style.borderRadius = '8px';
-  container.style.padding = '20px';
-  container.style.textAlign = 'center';
-  container.style.display = 'none';
-  container.style.flexDirection = 'column';
-  container.style.alignItems = 'center';
-  container.style.justifyContent = 'center';
+  container.className = 'quiz-panel';
+  container.innerHTML = `
+    <div class="quiz-card">
+      <div class="quiz-meta">
+        <span class="quiz-count"></span>
+        <span class="quiz-topic"></span>
+      </div>
+      <div class="quiz-q"></div>
+      <div class="quiz-opts"></div>
+      <div class="quiz-timerbar"><div></div></div>
+      <div class="quiz-feedback"></div>
+      <div class="quiz-actions"></div>
+    </div>
+  `;
   root.appendChild(container);
 
-  const questionEl = document.createElement('div');
-  questionEl.style.fontFamily = 'Cinzel, Georgia, serif';
-  questionEl.style.fontSize = '1.2rem';
-  questionEl.style.marginBottom = '20px';
-  questionEl.style.minHeight = '80px';
-  container.appendChild(questionEl);
+  const card = container.querySelector('.quiz-card');
+  const countEl = container.querySelector('.quiz-count');
+  const topicEl = container.querySelector('.quiz-topic');
+  const qEl = container.querySelector('.quiz-q');
+  const optsEl = container.querySelector('.quiz-opts');
+  const timerEl = container.querySelector('.quiz-timerbar > div');
+  const feedbackEl = container.querySelector('.quiz-feedback');
+  const actionsEl = container.querySelector('.quiz-actions');
 
-  const optionsContainer = document.createElement('div');
-  optionsContainer.style.display = 'flex';
-  optionsContainer.style.flexDirection = 'column';
-  optionsContainer.style.gap = '8px';
-  optionsContainer.style.width = '100%';
-  container.appendChild(optionsContainer);
+  let onAnswer = null;
+  let answered = false;
+  let timerId = null;
+  let rafId = null;
+  let deadline = 0;
 
-  const btnContainer = document.createElement('div');
-  btnContainer.style.marginTop = '20px';
-  btnContainer.style.display = 'flex';
-  btnContainer.style.gap = '10px';
-  container.appendChild(btnContainer);
+  function stopTimer() {
+    clearInterval(timerId);
+    timerId = null;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    timerEl.style.transition = 'none';
+    timerEl.style.width = '100%';
+  }
 
-  function ask(qText, qIndex, qTotal, callback) {
-    totalQuestions = qTotal; onAnswer = callback; questionIndex = qIndex;
-    questionEl.innerHTML = qText;
-    // opciones del banco
-    const options = currentQuestion ? currentQuestion.options : ['A','B','C','D'];
-    optionsContainer.innerHTML = '';
-    btnContainer.innerHTML = '';
-    options.forEach((opt, i) => {
-      const btn = document.createElement('button');
-      btn.textContent = opt;
-      btn.style.flex = '1'; btn.style.padding = '10px'; btn.style.background = '#ecf0f1'; btn.style.border = 'none'; btn.style.cursor = 'pointer'; btn.style.fontFamily = 'Cinzel, Georgia, serif'; btn.onclick = ()=> selectAnswer(i);
-      optionsContainer.appendChild(btn);
-    });
-    // botón submit
-    const submitBtn = document.createElement('button');
-    submitBtn.textContent = 'Responder';
-    submitBtn.style.width = '100%'; submitBtn.style.padding = '10px'; submitBtn.style.background = '#3498db'; submitBtn.style.color = 'white'; submitBtn.style.border = 'none'; submitBtn.style.cursor = 'pointer'; submitBtn.style.fontFamily = 'Cinzel, Georgia, serif'; submitBtn.onclick = ()=>{ if(!currentQuestion) selectAnswer(null); };
-    btnContainer.appendChild(submitBtn);
-    // timer simple
-    clearTimeout(timer); timer = setTimeout(()=>{ if(onAnswer) onAnswer({ok:false, selected:-1, correct:currentQuestion?currentQuestion.answerIdx:-1, timedOut:true}); hide(); }, 20000);
-    container.style.display = 'flex';
+  function close() {
+    stopTimer();
+    container.classList.remove('open');
+    onAnswer = null;
+    answered = false;
+    feedbackEl.className = 'quiz-feedback';
+    feedbackEl.innerHTML = '';
+    actionsEl.innerHTML = '';
+    actionsEl.style.display = 'none';
+  }
+
+  function isOpen() {
+    return container.classList.contains('open');
+  }
+
+  function finish(result) {
+    if (answered) return;
+    answered = true;
+    stopTimer();
+    const cb = onAnswer;
+    onAnswer = null;
+    if (cb) {
+      try { cb(result); } catch (err) { console.error('[quiz] onAnswer:', err); }
+    }
   }
 
   function selectAnswer(idx) {
-    clearTimeout(timer);
-    const correctIdx = currentQuestion ? currentQuestion.answerIdx : -1;
+    if (answered) return;
+    const correctIdx = Number(optsEl.dataset.correct);
     const ok = idx === correctIdx;
-    if (onAnswer) onAnswer({ok, selected:idx, correct:correctIdx, timedOut:false});
-    hide();
+
+    const list = Array.from(optsEl.children);
+    for (const b of list) b.disabled = true;
+
+    if (list[idx]) list[idx].classList.add(ok ? 'correct' : 'wrong');
+    if (!ok && list[correctIdx]) list[correctIdx].classList.add('correct');
+
+    finish({ ok, selected: idx, correct: correctIdx, timedOut: false });
+
+    if (ok) {
+      sfx('correct');
+      feedbackEl.className = 'quiz-feedback ok';
+      feedbackEl.textContent = '¡Respuesta correcta! La runa del santuario se enciende.';
+      setTimeout(() => { if (container.classList.contains('open')) close(); }, 1300);
+    } else {
+      sfx('wrong');
+      feedbackEl.className = 'quiz-feedback bad';
+      const exp = buttons.dataset.explanation || '';
+      feedbackEl.innerHTML = '<strong>Respuesta incorrecta.</strong> Pierdes medio corazón. '
+        + (exp ? '<br>' + exp : '');
+      actionsEl.style.display = 'flex';
+      const btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.textContent = 'Continuar';
+      btn.addEventListener('click', () => close());
+      actionsEl.innerHTML = '';
+      actionsEl.appendChild(btn);
+      btn.focus();
+    }
   }
 
-  function hide() {
-    container.style.display = 'none';
-    if (timer) { clearTimeout(timer); timer = null; }
+  /**
+   * ask(question, index, total, callback)
+   * question: { q, options, answerIdx, explanation?, subtopic? }
+   */
+  function ask(question, index = 1, total = 20, callback = null) {
+    if (!question || !Array.isArray(question.options) || question.options.length === 0) return;
+
+    onAnswer = callback;
+    answered = false;
+    countEl.textContent = 'Pregunta ' + index + ' de ' + total;
+    topicEl.textContent = question.subtopic || '';
+    qEl.textContent = question.q || '';
+
+    optsEl.innerHTML = '';
+    const correct = Number(question.answerIdx);
+    question.options.forEach((opt, i) => {
+      const b = document.createElement('button');
+      b.className = 'quiz-opt';
+      b.type = 'button';
+      b.innerHTML = '<span class="letter">' + (LETTERS[i] || String(i + 1)) + '</span><span></span>';
+      b.lastChild.textContent = opt;
+      b.addEventListener('click', () => selectAnswer(i));
+      optsEl.appendChild(b);
+    });
+
+    // Metadatos que selectAnswer lee del contenedor de opciones.
+    optsEl.dataset.correct = String(correct);
+    optsEl.dataset.explanation = question.explanation || '';
+
+    feedbackEl.className = 'quiz-feedback';
+    feedbackEl.innerHTML = '';
+    actionsEl.innerHTML = '';
+    actionsEl.style.display = 'none';
+
+    container.classList.add('open');
+    sfx('questionOpen');
+
+    // Temporizador con barra.
+    stopTimer();
+    deadline = performance.now() + TIME_LIMIT * 1000;
+    timerEl.style.transition = 'none';
+    timerEl.style.width = '100%';
+    requestAnimationFrame(() => {
+      if (!isOpen()) return;
+      timerEl.style.transition = 'width ' + TIME_LIMIT + 's linear';
+      timerEl.style.width = '0%';
+    });
+    timerId = setInterval(() => {
+      if (answered) { stopTimer(); return; }
+      if (performance.now() >= deadline) {
+        const list = Array.from(optsEl.children);
+        const correctIdx = Number(optsEl.dataset.correct);
+        for (const b of list) b.disabled = true;
+        if (list[correctIdx]) list[correctIdx].classList.add('correct');
+        finish({ ok: false, selected: -1, correct: correctIdx, timedOut: true });
+        sfx('wrong');
+        feedbackEl.className = 'quiz-feedback bad';
+        const exp = optsEl.dataset.explanation || '';
+        feedbackEl.innerHTML = '<strong>Se acabó el tiempo.</strong> Pierdes medio corazón. '
+          + (exp ? '<br>' + exp : '');
+        actionsEl.style.display = 'flex';
+        const btn = document.createElement('button');
+        btn.className = 'btn';
+        btn.textContent = 'Continuar';
+        btn.addEventListener('click', () => close());
+        actionsEl.innerHTML = '';
+        actionsEl.appendChild(btn);
+      }
+    }, 200);
   }
 
-  return { ask, close: hide, isOpen:()=>container.style.display === 'flex' };
+  return { ask, close, isOpen };
 }
