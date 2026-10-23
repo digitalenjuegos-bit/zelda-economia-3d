@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>smoke</title>
+<style>html,body{margin:0;background:#111;color:#eee;font:12px/1.4 monospace}canvas{display:block}#out{white-space:pre-wrap;padding:8px}</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="640" height="360"></canvas>
+<pre id="out">PENDIENTE</pre>
+<script type="module">
+const errors = [];
+const log = [];
+window.addEventListener('error', (e) => errors.push('window.error: ' + (e.message || e.error)));
+window.addEventListener('unhandledrejection', (e) => errors.push('unhandled: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)));
+const origErr = console.error.bind(console);
+console.error = (...a) => { errors.push('console.error: ' + a.map(String).join(' ')); origErr(...a); };
+
+function step(name, fn) {
+  try { const r = fn(); log.push('OK   ' + name + (r !== undefined ? ' :: ' + r : '')); return r; }
+  catch (e) { errors.push('FAIL ' + name + ' :: ' + (e && e.stack ? e.stack.split('\n').slice(0,3).join(' | ') : e)); log.push('FAIL ' + name); return null; }
+}
+
+function finish() {
+  const ok = errors.length === 0;
+  const payload = { ok, errors, log };
+  window.__SMOKE__ = payload;
+  document.getElementById('out').textContent = 'SMOKE_RESULT ' + JSON.stringify(payload);
+  document.title = ok ? 'SMOKE_OK' : 'SMOKE_FAIL';
+}
+
+(async () => {
+  const THREE = await import('three');
+  const { initCore, renderFrame, core } = await import('../../src/engine/core.js');
+  const { buildRegion, REGIONS } = await import('../../src/engine/world.js');
+  const { createParticles } = await import('../../src/engine/particles.js');
+  const { createHero } = await import('../../src/entities/hero.js');
+  const { createEnemy, createBoss, ENEMY_TYPES } = await import('../../src/entities/enemy.js');
+  const P = await import('../../src/entities/props.js');
+
+  log.push('three r' + THREE.REVISION);
+  log.push('REGIONS=' + REGIONS.length + ' [' + REGIONS.map(r => r.name).join(' / ') + ']');
+  log.push('ENEMY_TYPES=' + Object.keys(ENEMY_TYPES).join(','));
+
+  const canvas = document.getElementById('c');
+  const ctx = step('initCore', () => initCore(canvas));
+  if (!ctx) { finish(); return; }
+  const { scene } = ctx;
+
+  const particles = step('createParticles', () => createParticles(scene));
+
+  // ── Construir y validar las 4 regiones ────────────────────────────
+  const required = ['index','name','theme','terrain','colliders','cylinders','spawn','bounds',
+    'shrines','chests','signs','torches','portal','bossArena','enemySpawns','waterLevel','dispose'];
+  let region0 = null;
+  for (let i = 0; i < REGIONS.length; i++) {
+    const reg = step('buildRegion(' + i + ')', () => buildRegion(scene, i));
+    if (!reg) continue;
+    const missing = required.filter(k => !(k in reg));
+    if (missing.length) errors.push('region ' + i + ' sin campos: ' + missing.join(','));
+    if (!reg.terrain || typeof reg.terrain.heightAt !== 'function') errors.push('region ' + i + ': terrain.heightAt no es funcion');
+    if (!Array.isArray(reg.shrines) || reg.shrines.length !== 5) errors.push('region ' + i + ': shrines=' + (reg.shrines && reg.shrines.length));
+    if (!Array.isArray(reg.enemySpawns) || reg.enemySpawns.length < 6) errors.push('region ' + i + ': enemySpawns=' + (reg.enemySpawns && reg.enemySpawns.length));
+    if (!reg.chests || !reg.chests.length) errors.push('region ' + i + ': sin cofre');
+    if (!reg.signs || !reg.signs.length) errors.push('region ' + i + ': sin cartel');
+    if (!reg.portal || typeof reg.portal.activate !== 'function') errors.push('region ' + i + ': portal.activate ausente');
+    const s0 = reg.shrines && reg.shrines[0];
+    if (s0) {
+      const sm = ['id','index','x','y','z','mesh','setLit'].filter(k => !(k in s0));
+      if (sm.length) errors.push('region ' + i + ' shrine sin: ' + sm.join(','));
+      step('region' + i + '.shrine.setLit(true)', () => s0.setLit(true));
+    }
+    const ch = reg.chests && reg.chests[0];
+    if (ch) step('region' + i + '.chest.open()', () => ch.open());
+    step('region' + i + '.portal.activate()', () => reg.portal.activate());
+    const h = reg.terrain.heightAt(0, 0);
+    if (!Number.isFinite(h)) errors.push('region ' + i + ': heightAt(0,0) no finito');
+    log.push('  region' + i + ' h(0,0)=' + h.toFixed(2) + ' spawn=' + JSON.stringify(reg.spawn) + ' agua=' + reg.waterLevel);
+    if (i === 0) region0 = reg; else step('dispose region' + i, () => reg.dispose());
+  }
+
+  if (!region0) { finish(); return; }
+
+  // ── Héroe ─────────────────────────────────────────────────────────
+  const hero = step('createHero', () => createHero(scene, particles));
+  if (hero) {
+    const hm = ['group','pos','radius','facing','hearts','maxHearts','update','attack','hurt','heal','respawn','setVisible','dispose'];
+    const miss = hm.filter(k => !(k in hero));
+    if (miss.length) errors.push('hero sin: ' + miss.join(','));
+    step('hero.attack()', () => hero.attack());
+    step('hero.hurt(1)', () => hero.hurt(1, { x: 0, z: 1 }));
+    step('hero.heal(1)', () => hero.heal(1));
+    step('hero.respawn(spawn)', () => hero.respawn(region0.spawn.x, region0.spawn.z));
+  }
+
+  // ── Enemigos ──────────────────────────────────────────────────────
+  const enemies = [];
+  for (const t of Object.keys(ENEMY_TYPES)) {
+    const e = step('createEnemy(' + t + ')', () => createEnemy(scene, t, 6, 6));
+    if (e) {
+      const em = ['group','type','hp','alive','isBoss','pos','update','takeHit','dispose'];
+      const miss = em.filter(k => !(k in e));
+      if (miss.length) errors.push('enemy ' + t + ' sin: ' + miss.join(','));
+      enemies.push(e);
+    }
+  }
+  const boss = step('createBoss(0)', () => createBoss(scene, 0, region0.bossArena));
+  if (boss) {
+    if (boss.isBoss !== true) errors.push('boss.isBoss no es true');
+    enemies.push(boss);
+  }
+
+  // ── Simulación de lógica (sin render) ─────────────────────────────
+  const input = { move: { x: 0.7, z: 0.7 }, enabled: true, consume: () => false };
+  const dt = 1 / 60;
+  step('simular 180 frames', () => {
+    for (let f = 0; f < 180; f++) {
+      if (hero) hero.update(dt, input, region0);
+      for (const e of enemies) e.update(dt, hero, region0);
+      if (particles) particles.update(dt);
+    }
+    return 'hero.pos=' + (hero ? hero.pos.x.toFixed(2) + ',' + hero.pos.z.toFixed(2) : 'n/a');
+  });
+
+  // ── Combate: matar un enemigo normal ──────────────────────────────
+  step('matar enemigo normal', () => {
+    const e = enemies.find(x => !x.isBoss);
+    if (!e) return 'sin enemigo';
+    let guard = 0;
+    while (e.alive && guard++ < 50) e.takeHit(1, { x: 0, z: 1 });
+    for (let f = 0; f < 90; f++) e.update(dt, hero, region0);
+    return 'alive=' + e.alive + ' visible=' + e.group.visible;
+  });
+
+  // ── Render real (post-proceso incluido) ───────────────────────────
+  step('renderFrame x3', () => { for (let i = 0; i < 3; i++) renderFrame(dt); return 'ok'; });
+
+  // ── Presupuesto real (autoReset off: suma todos los pases) ────────
+  step('presupuesto real', () => {
+    const info = core.renderer.info;
+    info.autoReset = false;
+    info.reset();
+    renderFrame(dt);
+    const r = 'calls=' + info.render.calls + ' tris=' + info.render.triangles +
+      ' geoms=' + info.memory.geometries + ' tex=' + info.memory.textures;
+    info.autoReset = true;
+    if (info.render.calls > 900) errors.push('presupuesto: draw calls ' + info.render.calls + ' > 900');
+    if (info.render.triangles > 350000) errors.push('presupuesto: triangulos ' + info.render.triangles + ' > 350k');
+    return r;
+  });
+
+  // ── Base de cada prop en y=0 (no flotan ni se hunden) ─────────────
+  step('base de props', () => {
+    const box = new THREE.Box3();
+    const v = new THREE.Vector3();
+    const solidBox = (root) => {
+      box.makeEmpty();
+      root.updateWorldMatrix(true, true);
+      root.traverse((o) => {
+        if (!o.isMesh || o.userData.isOutline) return;
+        const pos = o.geometry.attributes.position;
+        if (!pos) return;
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+          box.expandByPoint(v);
+        }
+      });
+      return box;
+    };
+    const out = [];
+    const probe = (label, obj) => {
+      if (!obj) { out.push(label + ' AUSENTE'); errors.push('prop ' + label + ' no construido'); return; }
+      const b = solidBox(obj);
+      if (!Number.isFinite(b.min.y)) { out.push(label + ' bbox invalida'); errors.push('prop ' + label + ' bbox invalida'); return; }
+      out.push(label + ' minY=' + b.min.y.toFixed(2) + ' maxY=' + b.max.y.toFixed(2));
+      if (b.min.y < -0.45 || b.min.y > 0.6) errors.push('prop ' + label + ' base fuera de rango: minY=' + b.min.y.toFixed(2));
+    };
+    probe('santuario', P.makeShrine(0, false).group);
+    probe('cofre', P.makeChest().group);
+    probe('cartel', P.makeSign('Prueba de cartel.'));
+    probe('antorcha', P.makeTorch().group);
+    probe('portal', P.makePortal().group);
+    probe('roca', P.makeRock(1));
+    probe('arbol', P.makeTree('oak'));
+    probe('arbusto', P.makeBush());
+    probe('rupia', P.makeRupee());
+    probe('cerca', P.makeFenceSegment());
+    probe('puente', P.makeBridge(6));
+    return out.join(' | ');
+  });
+
+  // ── Dispose: hooks propios e idempotencia ─────────────────────────
+  step('dispose ejecuta hooks', () => {
+    const t = P.makeTorch();
+    P.disposeObject(t.group);
+    if (!t.group.userData._disposed) { errors.push('disposeObject no ejecuto el hook de la antorcha'); return 'FALLO'; }
+    return 'hook ejecutado';
+  });
+
+  step('dispose idempotente', () => {
+    region0.dispose();
+    region0.dispose();
+    return 'ok';
+  });
+
+  finish();
+})().catch((e) => { errors.push('bootstrap: ' + (e && e.stack ? e.stack : e)); finish(); });
+</script>
+</body>
+</html>

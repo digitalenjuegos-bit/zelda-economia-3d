@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>El Reino de la Economía</title>
+  <script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/controls/OrbitControls": "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Nunito:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg:#f5f0e8; --text:#2d3436; --muted:#6c757d; --heart:#e74c3c; --rupee:#27ae60; --rune:#1abc9c; --gold:#f1c40f; --border:#2c3e50; --transition:.4s; --font-title:Cinzel, Georgia, serif; --font-body:Nunito, system-ui, sans-serif; }
+    * { box-sizing: border-box; margin:0; padding:0; }
+    body { font-family: var(--font-body); background: var(--bg); color: var(--text); min-height:100vh; overflow-x:hidden; }
+    #gameContainer { position:relative; width:100%; aspect-ratio:16/9; }
+    #canvasContainer { position:relative; width:100%; height:0; padding-bottom:56.25%; }
+    #threeCanvas { width:100%; height:100%; display:block; }
+    .hud { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+    .heart { position:absolute; width:40px; height:40px; background:var(--heart); clip-path:polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%); transform:rotate(-45deg); color:white; display:flex; align-items:center; justify-content:center; font-size:24px; padding:2px; margin:4px; }
+    .heartsRow { position:absolute; left:20px; top:20px; display:flex; gap:4px; }
+    .rupeeCounter { position:absolute; right:20px; top:20px; font-size:20px; color:var(--rupee); }
+    .rupeeIcon { display:inline-block; width:20px; height:20px; background:var(--rupee); clip-path:polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%); transform:rotate(-45deg); color:white; text-align:center; line-height:18px; margin-right:4px; }
+    .runesRow { position:absolute; left:20px; bottom:20px; display:flex; gap:2px; }
+    .rune { width:30px; height:30px; background:var(--rune); clip-path:polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%); transform:rotate(-45deg); color:white; font-size:14px; display:flex; align-items:center; justify-content:center; }
+    .minimap { position:absolute; right:20px; bottom:80px; width:150px; height:150px; background:white; border:2px solid var(--border); }
+    .minimap canvas { width:100%; height:100%; }
+    .silenceBtn { position:absolute; left:20px; top:20px; background:#e74c3c; color:white; border:none; padding:6px 12px; font-family:var(--font-body); cursor:pointer; display:none; }
+    .silenceBtn.active { background:#27ae60; }
+    .panel { position:absolute; top:100px; left:50%; transform:translateX(-50%); background:white; border:2px solid var(--border); padding:12px 20px; box-shadow:0 4px 12px rgba(0,0,0,0.15); min-width:200px; display:none; }
+    .panel.visible { display:block; }
+    .btn { display:inline-block; padding:6px 12px; background:#3498db; color:white; border:none; cursor:pointer; font-family:var(--font-body); margin:2px; }
+    .btn-secondary { background:#95a5a6; }
+    .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:white; border:1px solid var(--border); padding:8px 16px; box-shadow:0 2px 8px rgba(0,0,0,0.15); font-size:14px; display:none; z-index:100; }
+    .toast.visible { display:block; }
+    @media (max-width:600px) { .heartsRow { left:10px; } .rupeeCounter { right:10px; font-size:16px; } .runesRow { bottom:10px; left:10px; } .minimap { width:100px; height:100px; right:10px; bottom:10px; } .silenceBtn, .panel { left:10px; right:10px; transform:none; } .btn { width:100%; margin:4px 0; } }
+  </style>
+</head>
+<body>
+  <div id="gameContainer">
+    <div id="canvasContainer"><canvas id="threeCanvas"></canvas></div>
+    <div class="hud">
+      <div class="heartsRow" id="hearts"></div>
+      <div class="rupeeCounter"><span class="rupeeIcon">💎</span> <span id="rupees">0</span></div>
+      <div class="runesRow" id="runes"></div>
+      <button class="silenceBtn" id="silenceBtn" onclick="silenceToggle()">Silenciar</button>
+      <div class="minimap"><canvas id="minimap"></canvas></div>
+    </div>
+    <div class="panel" id="panel"><div class="toast" id="toast"></div><div class="btn btn-secondary" onclick="closePanel()">Cerrar</div></div>
+  </div>
+  <script type="module">
+import { initCore, core, setTheme, gradientMap, toon, outlineMesh, withOutline, glow, rimPatch, rng, fbm, canvasTex, TEX, createInput, bindTouchUI, createRig, createParticles } from './src/engine/core.js';
+import { createHero } from './src/entities/hero.js';
+import { createRoster } from './src/roster.js';
+import { EXAM_ID, LS_KEY, TEACHER_KEY, SUPABASE_URL, SUPABASE_ANON_KEY } from './src/config.js';
+import { QUESTION_BANK } from './src/bank.js';
+import { createHUD } from './src/ui/hud.js';
+import { createQuiz } from './src/ui/quiz.js';
+import { createScreens } from './src/ui/screens.js';
+import { createAudio } from './src/audio.js';
+import { createParticles as createParticlesGlobal } from './src/engine/particles.js';
+import { createTex } from './src/engine/tex.js';
+import { createToon } from './src/engine/toon.js';
+import { createPhysics } from './src/engine/physics.js';
+import { createCamera } from './src/engine/camera.js';
+import { createInput as createInputGlobal } from './src/engine/input.js';
+
+const EXAM = EXAM_ID;
+const LS = LS_KEY;
+const ROster = createRoster();
+
+let coreRef, renderer, scene, camera, composer, clock, dt;
+let hero, regionIndex = 0, progress = { hearts:5, rupias:0, streak:0, runes:[] };
+let combat, game, hud, quiz, screens, audio, particles, tex, toon, physics, input, rig;
+let studentName = '', studentLastname = '', course = '1BGU A';
+let attemptCount = 0;
+let isMuted = false;
+
+function $(s) { return document.querySelector(s); }
+
+function showToast(t, kind='info') {
+  const el = $('#toast');
+  el.textContent = t; el.className = 'toast visible';
+  setTimeout(() => el.className = 'toast', 3000);
+}
+
+function silenceToggle() {
+  isMuted = !isMuted;
+  audio.setMuted(isMuted);
+  $('#silenceBtn').classList.toggle('active', isMuted);
+}
+
+function startAdventure() {
+  if (!studentName || !course) { showToast('Selecciona tu nombre y curso'); return; }
+  // guardar inicio de sesión
+  localStorage.setItem(LS, JSON.stringify({ studentName, studentLastname, course, regionIndex:0, progress:progress, attemptCount }));
+  // iniciar motor
+  coreRef = initCore($('threeCanvas'));
+  renderer = coreRef.renderer; scene = coreRef.scene; camera = coreRef.camera; composer = coreRef.composer; clock = coreRef.clock;
+  setTheme({ sunColor:0xfff1d0, sunIntensity:1.5, hemiSky:0x74b9ff, hemiGround:0x4a6b3a, hemiIntensity:0.55, skyTop:0x74b9ff, skyHorizon:0xfdf3d6, fogColor:0x8ec5ff, fogNear:40, fogFar:130, exposure:1.12 });
+  // build region
+  regionIndex = 0; progress = { hearts:5, rupias:0, streak:0, runes:[] };
+  hero = createHero(scene, particles);
+  const region = buildRegion(scene, regionIndex);
+  // camera & rig
+  rig = createRig(camera); rig.follow = true;
+  // input
+  input = createInputGlobal($('threeCanvas')); bindTouchUI($('threeCanvas'), input);
+  // HUD
+  hud = createHUD($('gameContainer'));
+  hud.setHearts(progress.hearts, 5); hud.setRupees(progress.rupias, false); hud.setRunes(progress.runes, 5); hud.setRegion(region.name); hud.setStreak(progress.streak);
+  // screens
+  screens = createScreens($('gameContainer'));
+  screens.intro({ onStart: initGame });
+}
+
+function initGame() {
+  // quiz setup
+  quiz = createQuiz($('gameContainer'), audio);
+  // start first region
+  updateRegion();
+}
+
+function updateRegion() {
+  const region = buildRegion(scene, regionIndex);
+  hud.setRegion(region.name);
+  // minimap
+  const minimapData = { width:150, height:150, region, heroPos:hero.pos, shrines:region.shrines };
+  hud.setMinimap(minimapData); hud.drawMinimap(region, hero.pos, region.shrines);
+  // enemies + combat
+  if (!combat) combat = createCombat({ hero, particles, audio, hud, onHeroDeath });
+  combat.update(0.05, region.enemySpawns, region);
+  // update HUD
+  hud.setHearts(progress.hearts, 5); hud.setRupees(progress.rupias, true); hud.setRunes(progress.runes, 5); hud.setStreak(progress.streak);
+}
+
+function onHeroDeath() {
+  progress.hearts = 5; progress.runes.forEach((r,i)=>{ if(i>0) progress.runes[i-1]=true; }); // simplify
+  showToast('Te desmayaste. Recuperando corazones...');
+  // reset region progress but keep runas encendidas
+  updateRegion();
+}
+
+function onAnswer({ok, selected, correct}) {
+  if (ok) { progress.rupias += 5; progress.streak++; }
+  else { progress.hearts--; if(progress.hearts<=0) { progress.hearts=0; showToast('Game over'); screens.defeat(()=>{ if(confirm('¿Reintentar?')) resetGame(); }); } }
+  hud.setHearts(progress.hearts, 5); hud.setRupees(progress.rupias, true); hud.setRunes(progress.runes, 5); hud.setStreak(progress.streak);
+}
+
+function resetGame() { attemptCount++; startAdventure(); }
+
+async function sendResult() {
+  const grade = Math.round(progress.rupias * 0.5); // aciertos × 0.5 sobre 10
+  const range = grade>=8?'S': grade>=5?'A': grade>=3?'B':'C';
+  const row = { exam_id:EXAM, student_name:studentName, student_lastname:studentLastname, course, score:progress.rupias, total:20, grade, timestamp:Date.now(), attempt:attemptCount, answers:[] };
+  // supabase send (reutiliza supabase.js existente, no tocar)
+  showToast(`Resultado enviado: ${grade}${range}`);
+}
+
+// ── EVENTOS DOM ──
+$('panel').addEventListener('click', ()=>$('panel').classList.remove('visible'));
+$('toast').addEventListener('click', ()=>$('toast').className='toast');
+
+// Simulación de flujo de juego con roster
+document.addEventListener('DOMContentLoaded', ()=> {
+  const rosterSelect = document.createElement('select');
+  rosterSelect.id = 'rosterSelect';
+  rosterSelect.innerHTML = '<option value="">-- Selecciona tu nombre --</option>';
+  ROster.ROSTER.forEach(n=> {
+    const opt = document.createElement('option');
+    opt.value = n; opt.textContent = n; rosterSelect.appendChild(opt);
+  });
+  rosterSelect.addEventListener('change', e=>{ studentName=e.target.value.split(' ').slice(0,-1).join(' '); studentLastname=e.target.value.split(' ').pop(); course = studentName.includes('1BGU B')?'1BGU B':studentName.includes('1BGU C')?'1BGU C':'1BGU A'; $('#rosterSelect').classList.add('hidden'); $('panel').classList.add('visible'); });
+  document.body.appendChild(rosterSelect);
+  $('panel').classList.add('visible');
+});
+
+// Audio autoplay policy: desbloquea tras primera interacción
+document.body.addEventListener('click', ()=>{ if(audio) audio.resume(); document.body.removeEventListener('click', arguments.callee); }, {once:true});
+</script>
+</body>
+</html>
